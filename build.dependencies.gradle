@@ -1,7 +1,9 @@
 repositories {
     mavenCentral()
     google() // Needed for androidx
-    maven { url = 'https://maven.brott.dev/' }   // 新增：FTC Dashboard
+    maven { url = 'https://maven.brott.dev/' }              // FTC Dashboard (:8080)
+    maven { url = 'https://mymaven.bylazar.com/releases' }  // Panels (:8001)
+    maven { url = 'https://repo.dairy.foundation/releases' } // Panels 相依 (Sloth)
 }
 
 dependencies {
@@ -15,4 +17,5 @@ dependencies {
     implementation 'org.firstinspires.ftc:Vision:12.0.0'
     implementation 'androidx.appcompat:appcompat:1.2.0'
     implementation 'com.acmerobotics.dashboard:dashboard:0.4.16'   // 新增：FTC Dashboard
+    implementation 'com.bylazar:fullpanels:1.0.18'                 // 新增：Panels (192.168.43.1:8001)
 }
