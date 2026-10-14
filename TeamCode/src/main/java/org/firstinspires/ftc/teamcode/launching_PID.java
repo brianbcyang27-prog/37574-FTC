@@ -51,24 +51,23 @@ import org.firstinspires.ftc.robotcore.external.Telemetry;
  *    FTC Dashboard http://192.168.43.1:8080/dash     ← 備用
  *  (Mac 連上 Control Hub 的 Wi-Fi 後即可開啟，不需要 USB)
  *
+ *  ★ 面板上只有四個可調變數，其他全部是固定常數，不會出現在面板：
+ *        SPEED ....... 一般速度 (0.0 ~ 1.0)
+ *        kP / kI / kD  PID 三個增益
+ *
  *  調參順序建議：
- *    (1) 先只調 kF：把 kI、kD 設 0，看 TargetRPM 與 ActualRPM 是否幾乎重疊在
- *        全速附近。差多少就把 kF 往上/往下修 (kF = 1.0 代表前饋剛好等於比例 power)。
- *    (2) 再加 kP：從 0.001 開始往上加，直到「手指撥一下飛輪」能很快回來、且
- *        不來回震盪。kP 是恢復速度的主要來源。
- *    (3) 最後加一點 kI 消掉穩態誤差，但保持 kI 很小 (0.001~0.005)。太大會在
- *        球打上去之後超調。
- *    (4) kD 通常保持 0。要加的話從 0.0002 開始「非常小」，因為 hub 的轉速
+ *    (1) 先把 kI、kD 都設 0，只留 kP：從 0.0015 開始往上加，直到「手指撥一下
+ *        飛輪」能很快回來、且不來回震盪。kP 是恢復速度的主要來源。
+ *    (2) 加一點 kI (0.001~0.005) 消掉穩態誤差。太大會在球打上去之後超調。
+ *    (3) kD 通常保持 0。要加的話從 0.0002 開始「非常小」，因為 hub 的轉速
  *        量測有雜訊，kD 放太大會讓馬達發抖。
- *    (5) 每次調完，用 Start 鍵歸零 RecoveryMs 統計，重新打幾顆球比較數字。
+ *    (4) 每次調完，用 START 鍵歸零 RecoveryMs 統計，重新打幾顆球比較數字。
  *
  *  手把 (Logitech F310，切到 XInput / X 模式)：
- *    A/X/Y/B ........ 設定基準速度 100% / 75% / 50% / 25%
- *    左or右搖桿 Y ... 連續微調 (往上推加速、往下推減速，放手保持)
- *    D-Pad 上/下 .... 一段 +/-5%      D-Pad 左/右 ... 微調 +/-1%
- *    LB ............. 回到基準速度 (取消微調)
- *    RB ............. 立刻停止 (最高優先、並歸零)
- *    RT ............. 壓住時直接照板機深度給速度 (暫時全速)
+ *    D-Pad 上 ....... 一般速度 +5% (按住會連續增加)
+ *    D-Pad 下 ....... 一般速度 -5% (按住會連續減少)
+ *    RB ............. 緊急切斷：SPEED 歸零、飛輪立刻斷電
+ *                     (要再按 D-Pad 上才會重新供電)
  *    START .......... 歸零 RecoveryMs / DipDepth / Shots 統計
  *    到位時手把震一下
  * ============================================================================
@@ -79,90 +78,75 @@ import org.firstinspires.ftc.robotcore.external.Telemetry;
 public class launching_PID extends OpMode {
 
     // =========================================================================
-    //  1. 硬體 / 目標轉速
+    //  1. 面板可調參數 —— 只有這四個會出現在 Panels / Dashboard 上
     // =========================================================================
-    /** 硬體設定裡那顆飛輪馬達的名字 */
-    public static String MOTOR_NAME = "motor";
-    /** goBILDA 6000rpm 裸馬達：馬達軸一圈 28 個 encoder count */
-    public static double TICKS_PER_REV = 28.0;
-    /** 飛輪定義上的最高轉速 (目標比例的 100%)，先保守抓 6000 的 90% */
-    public static double MAX_RPM = 5400.0;
-
-    // =========================================================================
-    //  2. 手把速度設定
-    // =========================================================================
-    public static double PRESET_FULL = 1.00;   // A
-    public static double PRESET_HIGH = 0.75;   // X
-    public static double PRESET_MID  = 0.50;   // Y
-    public static double PRESET_LOW  = 0.25;   // B
-    /** 搖桿推到底時，每秒改變的速度比例 (0.6 = 約 1.6 秒從 0 推到全速) */
-    public static double STICK_RATE = 0.60;
-    /** D-Pad 上/下 每按一次調整的比例 */
-    public static double DPAD_COARSE = 0.05;
-    /** D-Pad 左/右 每按一次調整的比例 */
-    public static double DPAD_FINE = 0.01;
-
-    // =========================================================================
-    //  3. 自寫 PIDF 參數
-    // =========================================================================
-    /** true = 改回 SDK 內建速度環 (舊做法)，用來跟自己寫的版本 A/B 比較 */
-    public static boolean USE_SDK_VELOCITY = false;
-
-    /** 前饋：power = kF * (目標轉速 / MAX_RPM)。kF = 1.0 表示前饋就等於比例 power */
-    public static double kF = 1.00;
-    /** 靜摩擦補償：只要有目標轉速就先墊一點 power，讓飛輪比較容易起步 */
-    public static double kS = 0.03;
+    /** 一般速度比例 0.0 ~ 1.0。面板滑桿 或 手把 D-Pad 上/下 都可以調 */
+    public static double SPEED = 0.75;
     /** 比例項 [power / RPM]  ← 恢復速度主要靠這個 */
     public static double kP = 0.0015;
     /** 積分項 [power / (RPM*秒)] ← 只負責修掉穩態誤差，保持小 */
     public static double kI = 0.0020;
     /** 微分項 [power / (RPM/秒)] ← 量測有雜訊，通常保持 0 */
     public static double kD = 0.0;
+
+    // =========================================================================
+    //  2. 固定常數 (全部 private，不出現在面板)
+    // =========================================================================
+    /** 硬體設定裡那顆飛輪馬達的名字 */
+    private static final String MOTOR_NAME = "motor";
+    /** goBILDA 6000rpm 裸馬達：馬達軸一圈 28 個 encoder count */
+    private static final double TICKS_PER_REV = 28.0;
+    /** 飛輪定義上的最高轉速 (SPEED 的 100%)，先保守抓 6000 的 90% */
+    private static final double MAX_RPM = 5400.0;
+
+    /** D-Pad 每按一次 (或連續重複時) 調整的速度比例 */
+    private static final double SPEED_STEP = 0.05;
+    /** D-Pad 按住不放時，每隔多久自動再加/減一次 (ms) */
+    private static final double DPAD_REPEAT_MS = 200.0;
+
+    /** true = 改回 SDK 內建速度環 (舊做法)，用來跟自己寫的版本 A/B 比較 */
+    private static final boolean USE_SDK_VELOCITY = false;
+    /** 前饋：power = kF * (目標轉速 / MAX_RPM)。kF = 1.0 表示前饋就等於比例 power */
+    private static final double kF = 1.00;
+    /** 靜摩擦補償：只要有目標轉速就先墊一點 power，讓飛輪比較容易起步 */
+    private static final double kS = 0.03;
     /** 只有誤差在 ±這個值以內才累積積分 (防大擾動時 windup) */
-    public static double I_BAND_RPM = 250.0;
+    private static final double I_BAND_RPM = 250.0;
     /** 積分項的最大貢獻 (power) */
-    public static double I_MAX = 0.25;
+    private static final double I_MAX = 0.25;
     /** 輸出上限 (power) */
-    public static double MAX_DUTY = 1.00;
+    private static final double MAX_DUTY = 1.00;
     /** 輸出斜率限制 [power/秒]，0 = 不限制 (恢復最快，但起步電流較大) */
-    public static double MAX_DUTY_RATE = 0.0;
+    private static final double MAX_DUTY_RATE = 0.0;
 
     /** SDK 內建速度環用的 PIDF (只有 USE_SDK_VELOCITY = true 時才生效) */
-    public static double SDK_P = 10.0;
-    public static double SDK_I = 0.0;
-    public static double SDK_D = 0.0;
-    public static double SDK_F = 11.7;
+    private static final double SDK_P = 10.0;
+    private static final double SDK_I = 0.0;
+    private static final double SDK_D = 0.0;
+    private static final double SDK_F = 11.7;
 
-    // =========================================================================
-    //  4. 電壓補償
-    // =========================================================================
-    public static boolean VOLTAGE_COMP = true;
+    /** 電壓補償開關 */
+    private static final boolean VOLTAGE_COMP = true;
     /** 電壓補償的基準電壓 (V)，通常用充滿電時的電壓 */
-    public static double NOMINAL_VOLTAGE = 12.5;
+    private static final double NOMINAL_VOLTAGE = 12.5;
 
-    // =========================================================================
-    //  5. 轉速量測
-    // =========================================================================
     /** true = 用編碼器位置差分自算轉速 (延遲比 hub 內建小)，false = 用 getVelocity() */
-    public static boolean USE_TICK_DELTA_VELOCITY = true;
+    private static final boolean USE_TICK_DELTA_VELOCITY = true;
     /** 差分視窗 (ms)。越大越平滑但越慢；6000rpm 下 50ms 約 126 個 count，雜訊約 ±1% */
-    public static double VEL_WINDOW_MS = 50.0;
+    private static final double VEL_WINDOW_MS = 50.0;
     /** 低通濾波強度 (0~1，1 = 不濾波)。1 反應最快但最抖 */
-    public static double VEL_SMOOTH = 0.65;
+    private static final double VEL_SMOOTH = 0.65;
 
-    // =========================================================================
-    //  6. 到位判斷 / 恢復時間量測
-    // =========================================================================
     /** 誤差在 ±這個 RPM 內算到位 */
-    public static double READY_TOL_RPM = 100.0;
+    private static final double READY_TOL_RPM = 100.0;
     /** 要連續維持這麼久才算真的穩 (避免只是路過) */
-    public static double READY_HOLD_MS = 150.0;
+    private static final double READY_HOLD_MS = 150.0;
     /** 轉速掉超過這個值就開始計時恢復 */
-    public static double DIP_THRESHOLD_RPM = 120.0;
+    private static final double DIP_THRESHOLD_RPM = 120.0;
     /** 目標轉速上升斜率 [RPM/秒]，避免起步瞬間拉爆電流 */
-    public static double TARGET_SLEW_UP = 9000.0;
+    private static final double TARGET_SLEW_UP = 9000.0;
     /** 目標轉速下降斜率 [RPM/秒] */
-    public static double TARGET_SLEW_DOWN = 9000.0;
+    private static final double TARGET_SLEW_DOWN = 9000.0;
 
     // =========================================================================
     //  執行期狀態
@@ -184,10 +168,9 @@ public class launching_PID extends OpMode {
     private boolean sdkModeApplied = false;  // 目前馬達跑在哪個模式
     private double lastSdkP = Double.NaN, lastSdkI = Double.NaN, lastSdkD = Double.NaN, lastSdkF = Double.NaN;
 
-    // 手把：微調與邊緣偵測
-    private double presetRatio = 0.0;
-    private double trim = 0.0;
-    private boolean prevDpadUp, prevDpadDown, prevDpadLeft, prevDpadRight, prevStart;
+    // 手把：D-Pad 調速 + RB 緊急切斷
+    private boolean prevDpadUp, prevDpadDown, prevCut, prevStart;
+    private final ElapsedTime dpadRepeatTimer = new ElapsedTime();
 
     // 轉速估算
     private boolean velInit = false;
@@ -305,8 +288,7 @@ public class launching_PID extends OpMode {
         panels.addData("ErrorRPM", error);
         panels.addData("Power", output);
         panels.addData("Voltage", voltage);
-        panels.addData("Ratio", desiredRatio);
-        panels.addData("Trim", trim);
+        panels.addData("Speed", desiredRatio);
         panels.addData("Status", statusText(targetRpm));
         panels.addData("Recovering", inDip ? 1 : 0);
         panels.addData("RecoveryMs", lastRecoveryMs);
@@ -327,64 +309,34 @@ public class launching_PID extends OpMode {
     // =========================================================================
 
     /**
-     * 把 F310 的輸入換算成 0~1 的速度比例。
-     * 邏輯：presetRatio (按鈕設定的基準) + trim (搖桿/D-Pad 微調)，RT 直接覆蓋，RB 強制歸零。
+     * 手把 → 目前的一般速度比例。
+     *   D-Pad 上/下 ... 加減 SPEED (按住連續重複)
+     *   RB ............ 緊急切斷：SPEED 歸零，飛輪立刻斷電
+     *   START ......... 歸零恢復時間統計
+     * SPEED 本身是面板變數，所以手把按了面板數字也會跟著動。
      */
     private double readGamepadRatio(double dt) {
-        // (a) A/X/Y/B 設定基準速度，同時把微調歸零
-        if (gamepad1.a) {
-            presetRatio = PRESET_FULL;
-            trim = 0;
-        } else if (gamepad1.x) {
-            presetRatio = PRESET_HIGH;
-            trim = 0;
-        } else if (gamepad1.y) {
-            presetRatio = PRESET_MID;
-            trim = 0;
-        } else if (gamepad1.b) {
-            presetRatio = PRESET_LOW;
-            trim = 0;
+        // (a) D-Pad 上/下：調整一般速度。剛按下時動一次，按住每 200ms 重複一次
+        boolean up = gamepad1.dpad_up;
+        boolean down = gamepad1.dpad_down;
+        boolean firstPress = (up && !prevDpadUp) || (down && !prevDpadDown);
+        if ((up || down) && (firstPress || dpadRepeatTimer.milliseconds() >= DPAD_REPEAT_MS)) {
+            double step = (up && !down) ? SPEED_STEP : ((down && !up) ? -SPEED_STEP : 0.0);
+            SPEED = clamp(SPEED + step, 0.0, 1.0);
+            dpadRepeatTimer.reset();
         }
-
-        // (b) 兩支搖桿都可以當「油門微調」：往上推加速、往下推減速、放手保持。
-        //     FTC 的 stick_y 往上推是負值，所以要取負號。
-        double stick = Math.abs(gamepad1.left_stick_y) > Math.abs(gamepad1.right_stick_y)
-                ? gamepad1.left_stick_y
-                : gamepad1.right_stick_y;
-        if (Math.abs(stick) > 0.08) {
-            trim -= stick * STICK_RATE * dt;
-        }
-
-        // (c) D-Pad：上/下一段 5%，左/右微調 1% (只在「剛按下」時觸發一次)
-        boolean up = gamepad1.dpad_up, down = gamepad1.dpad_down;
-        boolean left = gamepad1.dpad_left, right = gamepad1.dpad_right;
-        if (up && !prevDpadUp) trim += DPAD_COARSE;
-        if (down && !prevDpadDown) trim -= DPAD_COARSE;
-        if (right && !prevDpadRight) trim += DPAD_FINE;
-        if (left && !prevDpadLeft) trim -= DPAD_FINE;
         prevDpadUp = up;
         prevDpadDown = down;
-        prevDpadLeft = left;
-        prevDpadRight = right;
 
-        // (d) LB 回到基準速度 (取消微調)
-        if (gamepad1.left_bumper) {
-            trim = 0;
-        }
-
-        // (e) 組合
-        double ratio = clamp(presetRatio + trim, 0.0, 1.0);
-
-        // (f) RB 緊急停止 / RT 直接照板機深度 (這兩個優先權最高)
+        // (b) RB 緊急切斷：壓住期間強制 SPEED = 0 → 同一圈 targetRpm 歸零、power = 0。
+        //     這是鎖住的 (latched)：放開 RB 不會復電，要按 D-Pad 上才會重新供電。
         if (gamepad1.right_bumper) {
-            presetRatio = 0;
-            trim = 0;
-            ratio = 0;
-        } else if (gamepad1.right_trigger > 0.05) {
-            ratio = clamp(gamepad1.right_trigger, 0.0, 1.0);
+            if (!prevCut) gamepad1.rumble(400);
+            SPEED = 0.0;
         }
+        prevCut = gamepad1.right_bumper;
 
-        // (g) START 歸零恢復時間統計，方便比較調參前後
+        // (c) START 歸零恢復時間統計，方便比較調參前後
         if (gamepad1.start && !prevStart) {
             lastRecoveryMs = 0;
             worstRecoveryMs = 0;
@@ -393,7 +345,7 @@ public class launching_PID extends OpMode {
         }
         prevStart = gamepad1.start;
 
-        return ratio;
+        return clamp(SPEED, 0.0, 1.0);
     }
 
     // =========================================================================
