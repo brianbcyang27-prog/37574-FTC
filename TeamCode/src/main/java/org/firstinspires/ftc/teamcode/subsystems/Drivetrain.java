@@ -15,6 +15,7 @@ public final class Drivetrain extends OpBehavior {
     private double forward;
     private double strafe;
     private double turn;
+    private boolean slowMode;
 
     @Override
     public void Init() {
@@ -28,10 +29,11 @@ public final class Drivetrain extends OpBehavior {
         lb.setDirection(Config.LB_DIRECTION);
         rb.setDirection(Config.RB_DIRECTION);
 
-        lf.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
-        rf.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
-        lb.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
-        rb.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        for (DcMotor motor : new DcMotor[]{lf, rf, lb, rb}) {
+            motor.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+            // 馬達模式會保留上一個 OpMode 的設定（例如 RUN_TO_POSITION），這裡明確改回直接給電。
+            motor.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+        }
         stopMotors();
     }
 
@@ -44,21 +46,37 @@ public final class Drivetrain extends OpBehavior {
     /** 三個輸入分別是前後、橫移、旋轉，範圍都是 -1 到 1。 */
     public void setDrive(double forward, double strafe, double turn) {
         this.forward = forward;
-        this.strafe = strafe;
+        this.strafe = strafe * Config.STRAFE_GAIN;
         this.turn = turn;
+    }
+
+    public void setSlowMode(boolean slowMode) {
+        this.slowMode = slowMode;
     }
 
     @Override
     public void Loop() {
-        // 斜推或同時旋轉時保持四輪比例，並限制最大輸出。
-        double scale = Math.max(1.0,
-                Math.abs(forward) + Math.abs(strafe) + Math.abs(turn));
-        double power = Config.MAX_POWER / scale;
+        double lfPower = forward + strafe + turn;
+        double rfPower = forward - strafe - turn;
+        double lbPower = forward - strafe + turn;
+        double rbPower = forward + strafe - turn;
 
-        lf.setPower(power * (forward + strafe + turn));
-        rf.setPower(power * (forward - strafe - turn));
-        lb.setPower(power * (forward - strafe + turn));
-        rb.setPower(power * (forward + strafe - turn));
+        // 斜推或同時旋轉時保持四輪比例：最大的那顆輪子縮到 1，其餘等比例縮小。
+        double max = Math.max(1.0, Math.max(
+                Math.max(Math.abs(lfPower), Math.abs(rfPower)),
+                Math.max(Math.abs(lbPower), Math.abs(rbPower))));
+        double power = Config.MAX_POWER * (slowMode ? Config.SLOW_SCALE : 1.0) / max;
+
+        lf.setPower(power * lfPower);
+        rf.setPower(power * rfPower);
+        lb.setPower(power * lbPower);
+        rb.setPower(power * rbPower);
+
+        m_object.telemetry.addData("Drive", slowMode ? "SLOW" : "NORMAL");
+        m_object.telemetry.addData("Forward / Strafe / Turn", "%.2f / %.2f / %.2f",
+                forward, strafe, turn);
+        m_object.telemetry.addData("FL / FR", "%.2f / %.2f", power * lfPower, power * rfPower);
+        m_object.telemetry.addData("BL / BR", "%.2f / %.2f", power * lbPower, power * rbPower);
     }
 
     @Override

@@ -28,6 +28,7 @@ public final class ManualControl extends OpObject {
         double strafe = deadband(gamepad1.left_stick_x);
         double turn = deadband(gamepad1.right_stick_x);
         drivetrain.setDrive(forward, strafe, turn);
+        drivetrain.setSlowMode(gamepad1.right_bumper);
     }
 
     @Override
