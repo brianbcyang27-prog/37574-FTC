@@ -18,7 +18,7 @@ public class ServoRunForever extends OpMode {
      *
      * Start slowly and test with the mechanism clear.
      */
-    public double runPower = 0.3;
+    public double runPower = 1.0;
 
     /**
      * Power used when stopped. Should be 0.0.
