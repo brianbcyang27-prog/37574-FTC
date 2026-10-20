@@ -65,6 +65,13 @@ import java.util.Properties;
  *        kP / kI / kD  PID 三個增益
  *        kF / kS ..... 前饋：kF 乘上 (目標 / MAX_RPM)，kS 是起步墊的固定 power
  *        MAX_REVERSE . 降速時反向出力的上限 (0 ~ 1)，0 = 只靠摩擦滑停
+ *        REVERSE_MOTOR ..... 飛輪轉的方向反了 → 打勾 (馬達和編碼器一起反轉)
+ *        REVERSE_ENCODER ... 飛輪方向對，但 ActualRPM 是負的 → 打勾 (只反轉編碼器讀數)
+ *
+ *  ★ 第一次上車先確認方向：設 TARGET_RPM = 1000，
+ *    (a) 飛輪轉的方向不對 → 先 RB 停下，勾 REVERSE_MOTOR
+ *    (b) 方向對了但 ActualRPM 是負的或一直 0 附近 → 先 RB 停下，勾 REVERSE_ENCODER
+ *    編碼器方向錯的時候 PID 會以為轉速一直不夠而全速輸出，看到就馬上按 RB。
  *
  *  ★ 按下 START (▶) 時 SPEED 與 TARGET_RPM 都會歸零，飛輪不會自己轉起來。
  *    請在開始之後再用 D-Pad 上 或 面板設定速度。
@@ -90,7 +97,7 @@ import java.util.Properties;
  *    BACK ........... 立刻存檔目前的參數 (手把震一下)
  *    到位時手把震一下
  *
- *  參數存檔：kP / kI / kD / kF / kS / MAX_REVERSE 會存在 Control Hub 的
+ *  參數存檔：kP / kI / kD / kF / kS / MAX_REVERSE / REVERSE_MOTOR / REVERSE_ENCODER 會存在 Control Hub 的
  *  /sdcard/FIRST/launching_pid.properties。按 STOP 或 BACK 時存檔，下次 INIT 自動讀回，
  *  重開機、重新上傳程式都會保留。想回到程式裡寫的預設值，刪掉這個檔案即可。
  * ============================================================================
@@ -108,21 +115,31 @@ public class launching_PID extends OpMode {
     /** 直接指定目標轉速 [RPM]。> 0 時優先使用 (上限 MAX_RPM)，= 0 時改用 SPEED。按 START 時歸零 */
     public static double TARGET_RPM = 0.0;
     /** 比例項 [power / RPM]  ← 恢復速度主要靠這個 */
-    public static double kP = 0.0015;
+    public static double kP = 0.0;
     /** 積分項 [power / (RPM*秒)] ← 只負責修掉穩態誤差，保持小 */
-    public static double kI = 0.0020;
+    public static double kI = 0.0;
     /** 微分項 [power / (RPM/秒)] ← 量測有雜訊，通常保持 0 */
     public static double kD = 0.0;
     /** 前饋：power = kF * (目標轉速 / MAX_RPM)。kF = 1.0 表示前饋就等於比例 power */
-    public static double kF = 1.00;
+    public static double kF = 0.0;
     /** 靜摩擦補償：只要有目標轉速就先墊一點 power，讓飛輪比較容易起步 */
-    public static double kS = 0.03;
+    public static double kS = 0.0;
     /**
      * 反向出力上限 (power，0 ~ 1)。降速時由 PID 自己決定要不要反向出力把轉速壓下來，
      * 這裡只是上限：越大降速越快，但電流越大、齒輪/皮帶衝擊越大。
      * 0 = 不反向出力，只靠摩擦自然滑停。
      */
     public static double MAX_REVERSE = 0.30;
+    /**
+     * 飛輪轉的方向反了就打勾：馬達改成 REVERSE。
+     * SDK 反轉馬達時，編碼器讀數也會一起反轉，所以 PID 方向仍然正確。
+     */
+    public static boolean REVERSE_MOTOR = false;
+    /**
+     * 飛輪方向正確，但 ActualRPM 是負的就打勾：只把編碼器讀數乘上 -1。
+     * (編碼器和馬達的接線方向不一致時會發生，PID 會以為轉速一直不夠而全速輸出)
+     */
+    public static boolean REVERSE_ENCODER = false;
 
     // =========================================================================
     //  2. 固定常數 (全部 private，不出現在面板)
@@ -209,6 +226,9 @@ public class launching_PID extends OpMode {
     private double targetRpm = 0.0;
     private double lastDesiredRpm = 0.0;     // 上一圈手把 / 面板要求的轉速，用來偵測「改速度」
     private boolean sdkModeApplied = false;  // 目前馬達跑在哪個模式
+    // 目前實際套用到馬達 / 編碼器的方向，面板上的開關改了才重新套用
+    private boolean appliedReverseMotor = false;
+    private boolean appliedReverseEncoder = false;
     private double lastSdkP = Double.NaN, lastSdkI = Double.NaN, lastSdkD = Double.NaN, lastSdkF = Double.NaN;
 
     // 手把：D-Pad 調速 + RB 緊急切斷
@@ -257,7 +277,9 @@ public class launching_PID extends OpMode {
         ftcTelemetry = new MultipleTelemetry(telemetry, FtcDashboard.getInstance().getTelemetry());
 
         motor = hardwareMap.get(DcMotorEx.class, MOTOR_NAME);
-        motor.setDirection(DcMotor.Direction.FORWARD);
+        // 先讀回存檔，馬達方向才會用上次存的 REVERSE_MOTOR
+        loadTuning();
+        applyDirections();
         // 飛輪讓它自然滑停，不要煞車 (煞車會發熱、也會讓恢復時間變長)
         motor.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.FLOAT);
         motor.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
@@ -268,8 +290,7 @@ public class launching_PID extends OpMode {
             break;
         }
 
-        // 讀回上次存的參數，並推到網頁上，讓面板顯示的是實際使用的值
-        loadTuning();
+        // 參數已在上面讀回，推到網頁上，讓面板顯示的是實際使用的值
         syncPanelsNow();
 
         loopTimer.reset();
@@ -327,6 +348,10 @@ public class launching_PID extends OpMode {
         }
 
         // ---- 3. 讀轉速 ---------------------------------------------------
+        // 面板上的 REVERSE_MOTOR / REVERSE_ENCODER 改了就馬上套用
+        if (REVERSE_MOTOR != appliedReverseMotor || REVERSE_ENCODER != appliedReverseEncoder) {
+            applyDirections();
+        }
         double actualTps = readVelocityTps(nowMs);
         double actualRpm = tpsToRpm(actualTps);
 
@@ -376,6 +401,8 @@ public class launching_PID extends OpMode {
         panels.addData("Voltage", voltage);
         panels.addData("Speed", clamp(SPEED, 0.0, 1.0));
         panels.addData("Mode", TARGET_RPM > 0 ? "TARGET_RPM" : "SPEED");
+        panels.addData("Direction", "motor " + (REVERSE_MOTOR ? "REVERSE" : "FORWARD")
+                + " / encoder " + (REVERSE_ENCODER ? "REVERSED" : "NORMAL"));
         panels.addData("LoopMs", dt * 1000.0);
         panels.addData("Status", statusText(targetRpm));
         panels.addData("Tuning", tuningStatus);
@@ -443,6 +470,8 @@ public class launching_PID extends OpMode {
             kF = readDouble(p, "kF", kF);
             kS = readDouble(p, "kS", kS);
             MAX_REVERSE = readDouble(p, "MAX_REVERSE", MAX_REVERSE);
+            REVERSE_MOTOR = readBoolean(p, "REVERSE_MOTOR", REVERSE_MOTOR);
+            REVERSE_ENCODER = readBoolean(p, "REVERSE_ENCODER", REVERSE_ENCODER);
             tuningStatus = "已讀取上次存的參數";
         } catch (Exception e) {
             tuningStatus = "讀取存檔失敗，使用程式預設值: " + e.getMessage();
@@ -457,12 +486,23 @@ public class launching_PID extends OpMode {
         p.setProperty("kF", Double.toString(kF));
         p.setProperty("kS", Double.toString(kS));
         p.setProperty("MAX_REVERSE", Double.toString(MAX_REVERSE));
+        p.setProperty("REVERSE_MOTOR", Boolean.toString(REVERSE_MOTOR));
+        p.setProperty("REVERSE_ENCODER", Boolean.toString(REVERSE_ENCODER));
         try (FileOutputStream out = new FileOutputStream(TUNING_FILE)) {
             p.store(out, "launching_PID tuned values");
             tuningStatus = "已存檔";
         } catch (Exception e) {
             tuningStatus = "存檔失敗: " + e.getMessage();
         }
+    }
+
+    private static boolean readBoolean(Properties p, String key, boolean fallback) {
+        String v = p.getProperty(key);
+        if (v == null) return fallback;
+        v = v.trim();
+        if (v.equalsIgnoreCase("true")) return true;
+        if (v.equalsIgnoreCase("false")) return false;
+        return fallback;
     }
 
     private static double readDouble(Properties p, String key, double fallback) {
@@ -556,14 +596,17 @@ public class launching_PID extends OpMode {
             velInit = false;
         }
 
+        // REVERSE_ENCODER：只把編碼器讀數反過來 (馬達方向不變)
+        int encSign = REVERSE_ENCODER ? -1 : 1;
+
         if (!USE_TICK_DELTA_VELOCITY) {
-            smoothTps = motor.getVelocity();
+            smoothTps = encSign * motor.getVelocity();
             rawTps = smoothTps;
             updateMeasuredRate(nowMs);
             return smoothTps;
         }
 
-        int pos = motor.getCurrentPosition();
+        int pos = encSign * motor.getCurrentPosition();
         if (!velInit) {
             velInit = true;
             velWindowStart = nowMs;
@@ -621,6 +664,18 @@ public class launching_PID extends OpMode {
         motor.setMode(sdkVelocity ? DcMotor.RunMode.RUN_USING_ENCODER
                                   : DcMotor.RunMode.RUN_WITHOUT_ENCODER);
         sdkModeApplied = sdkVelocity;
+        pidf.reset();
+        velInit = false;
+    }
+
+    /**
+     * 套用面板上的 REVERSE_MOTOR / REVERSE_ENCODER。
+     * 方向一變，舊的轉速取樣和積分都不能用了，全部重新開始。
+     */
+    private void applyDirections() {
+        motor.setDirection(REVERSE_MOTOR ? DcMotor.Direction.REVERSE : DcMotor.Direction.FORWARD);
+        appliedReverseMotor = REVERSE_MOTOR;
+        appliedReverseEncoder = REVERSE_ENCODER;
         pidf.reset();
         velInit = false;
     }
