@@ -18,4 +18,6 @@ dependencies {
     implementation 'androidx.appcompat:appcompat:1.2.0'
     implementation 'com.acmerobotics.dashboard:dashboard:0.4.16'   // 新增：FTC Dashboard
     implementation 'com.bylazar:fullpanels:1.0.18'                 // 新增：Panels (192.168.43.1:8001)
+    implementation 'com.pedropathing:revhub:3.0.2'                 // 新增：Pedro Pathing 3
+    implementation 'com.pedropathing:tuning:1.0.2'                 // 新增：Pedro AutoTune (192.168.43.1:10158)
 }
